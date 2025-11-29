@@ -1,0 +1,433 @@
+% Do not change document class, margins, fonts, etc.
+\documentclass[a4paper,oneside,bibliography=totoc]{scrbook}
+
+% some useful packages (add more as needed)
+\usepackage[utf8]{inputenc}
+\usepackage{graphicx}
+\usepackage{latexsym}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{tabularx}
+\usepackage{booktabs}
+\usepackage{algorithm} % you can modify the algorithm style to your liking
+\counterwithin{algorithm}{section} % so that algorithms have chapter numbers as well
+\usepackage{algorithmic}
+\usepackage{csquotes}
+\usepackage{authblk}
+\usepackage{xurl}
+\usepackage{etoolbox}
+\usepackage{caption}
+\usepackage{subcaption}
+\renewcommand{\algorithmiccomment}[1]{\hfill\textit{// #1}}
+\usepackage[usenames,dvipsnames]{xcolor}
+\usepackage[colorlinks,citecolor=Green]{hyperref} % you may change/remove the colors
+\usepackage{lipsum} % you do not need this
+\usepackage{etoolbox}
+\makeatletter
+\patchcmd{\scr@startchapter}{\if@openright\cleardoublepage\else\clearpage\fi}{}{}{}
+\makeatother
+
+% chicago citation style
+\usepackage{natbib}
+\bibliographystyle{chicagoa}
+\setcitestyle{authoryear,round,semicolon,aysep={},yysep={,}} \let\cite\citep
+
+
+\begin{document}
+
+\frontmatter\subject{Project Outline} % change to appropriate type
+\title{Wildfire Ignition Forecasting}
+\author[1]{Anatole Lobenko}
+\author[1] {Ameya Dinesh Kurme}
+\author[1] {Hai Hoang Nguyen}
+\author[1] {Hayden Kulle}
+\author[1] {Joshua Nicolaus}
+\author[1] {Yeungbin Lee}
+\affil[1]{Team 13}
+\publishers{{\small Submitted to}\\
+  Data and Web Science Group\\
+  Prof.\ Dr.\ Sven Hertling\\
+  University of Mannheim\\}
+\maketitle
+
+\mainmatter
+\chapter{Problem Definition and Goals}
+
+Wildfire ignition prediction aims to estimate whether a fire will ignite at a specific
+location and date. We treat this as a binary classification task with the target variable
+\texttt{wildfire\_bin}~$\in\{0,1\}$.
+
+We use 10-day aggregated meteorological and drought conditions (temperature, humidity,
+wind, precipitation, radiation, fuel-moisture indices), complemented by terrain
+(\texttt{elevation\_m}, \texttt{slope\_deg}) and grouped NLCD land-cover features. These form the final
+tabular input for all models.
+
+Our objectives are to:
+\begin{enumerate}
+    \item Train and compare Logistic Regression, Random Forest, and XGBoost.
+    \item Identify the most informative features for ignition risk.
+    \item Evaluate performance---with emphasis on high recall---and analyse remaining
+          prediction errors.
+\end{enumerate}
+
+\chapter{Dataset}
+
+\section{Overview}
+We use the US Wildfire Dataset from Kaggle \cite{kaggle_wildfire_dataset}, which combines IRWIN
+ignition records with GRIDMET daily meteorological observations for the period
+2014--2025. Each sample is derived from a 75-day sequence around an ignition event; from
+this sequence we compute the 10-day averages that serve as model inputs.
+
+After preprocessing, the dataset contains 126{,}800 labelled samples, including
+50{,}720 ignition events and 76{,}080 synthesised non-ignition cases, providing broad
+spatial and temporal coverage. Table \ref{tab:raw-features} shows the dataset's features and their descriptions
+
+\begin{table}[H]
+    \centering
+    \caption{Feature structure of the raw dataset prior to preprocessing.}
+    \label{tab:raw-features}
+    \begin{tabularx}{\textwidth}{lX}
+        \toprule
+        Category & Variables \\
+        \midrule
+        Spatial / Temporal &
+        \texttt{latitude}, \texttt{longitude}, \texttt{datetime} \\
+        Target             &
+        \texttt{wildfire\_bin} (binary ignition label, 0/1) \\
+        Precipitation      &
+        \texttt{pr} \\
+        Humidity           &
+        \texttt{rmax}, \texttt{rmin} \\
+        Temperature        &
+        \texttt{tmmn}, \texttt{tmmx} \\
+        Wind               &
+        \texttt{vs} \\
+        Radiation          &
+        \texttt{srad} \\
+        Moisture / Atmosphere &
+        \texttt{sph}, \texttt{vpd} \\
+        Fire danger / fuel &
+        \texttt{bi}, \texttt{fm100}, \texttt{fm1000}, \texttt{erc}, \texttt{etr}, \texttt{pet} \\
+        \bottomrule
+    \end{tabularx}
+\end{table}
+
+\section{Data Assessment}
+
+The dataset contains real ignition samples and around 76k synthetic non-ignition samples, which closely match real records in feature ranges. A small number of rows where all features took the sentinel value \texttt{32767}—invalid GRIDMET frames—were removed, as were a few duplicates. The data extend through 2025, supporting a chronological train--validation--test split.
+
+\subsection{Temporal Distribution}
+Clear temporal shifts occur between the training years (2014--2021) and the test period (2022--2025). The ignition rate rises from about 20\% in the training period to 58\% in 2022--2025, with 2024 reaching nearly 86\%. Feature distributions also shift, with later ignitions occurring more often in south-western, lower-elevation, flatter, and more human-influenced areas. These changes affect calibration and contribute to the temporal error patterns discussed later.
+
+\subsection{Outliers}
+IQR-based outlier detection shows that precipitation (\texttt{pr}) has the highest outlier rate ($\sim$7\%), while other meteorological variables have fewer than 4\%. These values represent realistic environmental extremes and were retained. Ignition frequency is slightly lower among outlier rows (18.7\%) than non-outlier rows (21.2\%), indicating that isolated extreme values do not increase ignition likelihood.
+
+\subsection{Correlation}
+Strong correlation clusters ($|\rho| > 0.9$) occur among fuel-dryness indices (\texttt{erc}, \texttt{fm100}, \texttt{fm1000}), evapotranspiration variables (\texttt{etr}, \texttt{pet}), and humidity-related measures (\texttt{rmin}, \texttt{sph}, \texttt{vpd}). These relationships informed later feature-selection steps to reduce redundancy.
+
+
+
+\chapter{Preprocessing and Feature Engineering}
+
+\section{Preprocessing}
+Rows in which all meteorological and drought variables took the sentinel value \texttt{32767} were removed, as they represent invalid GRIDMET frames rather than real observations. A small number of duplicate entries—mostly among synthetic non-ignition samples—were also dropped. Outliers and correlations were assessed during data inspection, but no features were removed at this stage; all variables were kept for later engineering and selection.
+
+\section{Feature Engineering}
+Short-term environmental conditions were summarised by averaging each meteorological and drought variable over the 10 days preceding the reference date. Additional feature groups include rain-derived indicators (accumulated rainfall and time since last rain), terrain attributes from LANDFIRE~\cite{lanfiredataset2021}, grouped NLCD land-cover classes~\cite{nlcd2021dataset}, temporal encodings (cyclic day-of-year and weekday), and local fire activity within 50~km (\texttt{Fire50km\_past\_count}).
+\section{Feature Selection}
+Feature selection focused on reducing redundancy and improving stability. Technical identifiers were removed, and highly correlated engineered variables within the same meteorological or drought-related groups were simplified by retaining only representative predictors. Low-variation or unstable features, as well as overlapping temporal encodings and unnecessarily complex interactions, were removed to preserve interpretability. The final feature groups used for training are listed in Table~\ref{tab:final-features}.
+
+
+\begin{table}[H]
+    \centering
+    \caption{Final feature set used for modelling.}
+    \label{tab:final-features}
+    \begin{tabularx}{\textwidth}{lX}
+        \toprule
+        Feature group & Features (examples) \\
+        \midrule
+        Spatial \& terrain &
+        \texttt{latitude}, \texttt{longitude}, \texttt{elevation\_m}, \texttt{slope\_deg} \\
+        Rain-based indicators &
+        \texttt{pr\_max}, \texttt{pr\_sum}, \texttt{since\_prev\_pr} \\
+        10-day meteorological averages &
+        \texttt{rmax\_mean\_rt\_50\_59}, \texttt{rmin\_mean\_rt\_50\_59},
+        \texttt{sph\_mean\_rt\_50\_59}, \dots \\
+        Drought--terrain interactions &
+        \texttt{erc\_over\_fm1000}, \texttt{erc\_over\_fm1000\_slope} \\
+        Temporal (cyclical) &
+        \texttt{doy\_sin}, \texttt{doy\_cos} \\
+        Land-cover (grouped NLCD) &
+        \texttt{nlcd\_fuel\_continuity}, \texttt{nlcd\_canopy\_height\_class}, \dots \\
+        Target variable &
+        \texttt{wildfire\_bin} \\
+        \bottomrule
+    \end{tabularx}
+\end{table}
+
+\chapter{Machine Learning Approaches}
+
+\section{Baseline Model}
+As a simple reference, we include a temperature-based rule: \texttt{wildfire\_bin} = 1 if the 10-day maximum temperature exceeds $300\,\text{K}$, and 0 otherwise. This threshold was chosen based on the temperature distribution, where ignitions occur slightly more often at higher values.
+
+\section{Model Selection}
+We evaluate three standard classifiers for binary wildfire prediction:
+
+\begin{itemize}
+    \item \textbf{Logistic Regression (non-symbolic)}: A linear baseline model that offers interpretability and establishes a reference for learned classifiers.
+    \item \textbf{Random Forest (symbolic)}: A tree-based ensemble capturing nonlinear relationships and interactions in tabular data.
+    \item \textbf{XGBoost (symbolic)}: A gradient-boosted decision-tree model known for strong performance and effective modelling of complex feature interactions.
+\end{itemize}
+
+
+\chapter{Evaluation}
+
+\section{Experimental Setup}
+
+Models are trained on 2014--2021 data with a 20\% validation split and evaluated on 2022--2025 to approximate a real forecasting scenario. Logistic Regression uses z-score normalisation, while tree-based models operate on the original feature scales. The class distribution is imbalanced and shifts over time (training $\sim$4{:}1, test $\sim$1.4{:}1); since the split is chronological, stratification is not possible. Logistic Regression and Random Forest apply \texttt{class\_weight="balanced"} to compensate, whereas XGBoost handles imbalance through its internal loss.
+
+Performance is measured using accuracy, precision, recall, F1-score, and ROC--AUC, with ROC--AUC used for hyperparameter tuning due to its threshold-independence and robustness under imbalance. ROC and precision--recall curves further illustrate ranking behaviour across thresholds.
+
+
+
+\section{Hyperparameter Tuning}
+
+All models were tuned using the same validation split, selecting the configuration with the highest ROC--AUC. For each method, we explored a focused hyperparameter range and
+highlight the best values in \textbf{bold}.
+
+\begin{table}[H]
+\centering
+\caption{Hyperparameter search ranges and selected best values.}
+\label{tab:hyperparams}
+\begin{tabularx}{\textwidth}{l l X}
+\toprule
+\textbf{Model} & \textbf{Parameter} & \textbf{Range / Best Value} \\
+\midrule
+
+\textbf{Logistic Regression} 
+& Regularisation strength (\texttt{logreg\_C}) 
+& $\{0.01, 0.1, 1, \mathbf{10}\}$ \\
+
+\midrule
+
+\textbf{Random Forest} 
+& \texttt{n\_estimators} 
+& $\{100, \mathbf{200}, 300\}$ \\
+& \texttt{max\_depth} 
+& $\{\text{None}, 10, 20, \mathbf{30}\}$ \\
+& \texttt{min\_samples\_split} 
+& $\{2, 5, \mathbf{10}\}$ \\
+& \texttt{min\_samples\_leaf} 
+& $\{1, \mathbf{2}, 4\}$ \\
+& \texttt{max\_features} 
+& $\{\mathbf{"sqrt"}, "log2"\}$ \\
+
+\midrule
+
+\textbf{XGBoost} 
+& \texttt{max\_depth} 
+& $\{4, \mathbf{5}, 6\}$ \\
+& \texttt{min\_child\_weight} 
+& $[4, \mathbf{6}, 13]$ \\
+& \texttt{subsample} 
+& $[0.5, 1.0]$ (best: $\mathbf{0.926}$) \\
+& \texttt{colsample\_bytree} 
+& $[0.5, 1.0]$ (best: $\mathbf{0.814}$) \\
+& \texttt{reg\_lambda} 
+& $\{0, 0.1, 0.5, 1, 5, 10, 50, 100, \mathbf{200}\}$ \\
+& \texttt{reg\_alpha} 
+& $\{0, 0.1, 1, 5, 10, 50, \mathbf{100}\}$ \\
+& \texttt{learning\_rate} 
+& $\{0.01, 0.03, 0.05, \mathbf{0.07}, 0.1\}$ \\
+
+\bottomrule
+\end{tabularx}
+\end{table}
+
+
+\chapter{Model Performance Results}
+
+\section{Results}
+\label{sec:results}
+
+Because missing an ignition is far more costly than raising a false alarm, models are evaluated both at their default threshold and at a validation-selected high-recall threshold (targeting recall $\geq 0.8$). The results for all models on the 2022--2025 test set are shown in Table~\ref{tab:model-performance}.
+
+\begin{table}[H]
+    \centering
+    \caption{Model performance on the 2022--2025 test set.}
+    \label{tab:model-performance}
+    \begin{tabular}{llllll}
+        \toprule
+        Model & Threshold & Accuracy & Precision & Recall & F1 \\
+        \midrule
+        Baseline (Temp $>$ 300K) & --           & 0.490 & 0.616 & 0.325 & 0.426 \\
+        Logistic Regression      & Base         & 0.561 & 0.264 & 0.655 & 0.377 \\
+        Logistic Regression      & High recall  & 0.369 & 0.232 & 0.914 & 0.370 \\
+        Random Forest            & Base         & 0.478 & 0.830 & 0.128 & 0.223 \\
+        Random Forest            & High recall  & 0.630 & 0.630 & 0.880 & 0.734 \\
+        XGBoost                  & Base         & 0.592 & 0.702 & 0.468 & 0.561 \\
+        XGBoost                  & High recall  & 0.623 & 0.646 & 0.801 & 0.715 \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+Across all models, threshold adjustment mainly affects the precision--recall trade-off, while accuracy and F1 remain relatively stable. Among the learned models, XGBoost shows the most consistent performance across thresholds.
+
+Compared to the baseline rule (accuracy 0.49, recall 0.33), the high-recall XGBoost model substantially improves recall (0.80 vs.\ 0.33) while maintaining higher precision and overall F1. This makes it far more effective for avoiding missed ignitions.
+
+For these reasons, XGBoost is selected as the final model. The high-recall threshold reduces false negatives without severely degrading precision, and regime-specific thresholding further improves operational cost. Calibration analysis shows that XGBoost tends to underestimate absolute ignition probabilities, so its outputs are best interpreted as relative risk scores rather than calibrated likelihoods.
+
+\section{Tree Interpretation}
+
+Figure~\ref{fig:xgb-tree} shows an example tree from the XGBoost model. The top split is
+based on a fuel-dryness indicator, meaning the model first distinguishes days with very dry
+fuel conditions from those with more moisture. Subsequent branches rely heavily on recent
+rainfall patterns—such as how much rain fell in the past days or how long it has been since
+the last rain—reflecting the strong influence of short-term moisture deficits on ignition
+likelihood.
+
+Deeper splits incorporate factors such as burning conditions, humidity, elevation, and
+land-cover type, adjusting the prediction according to regional and terrain differences.
+Leaf values show the final risk: positive leaves correspond to dry, warm, fire-prone
+conditions, while negative leaves represent wetter or less favourable settings for ignition.
+Overall, the tree demonstrates that XGBoost learns intuitive rules linking dryness, recent
+weather, and landscape characteristics to ignition risk.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[height=0.35\textheight]{images/xgb_tree.png}
+    \caption{Example XGBoost tree structure (Tree 0).}
+    \label{fig:xgb-tree}
+\end{figure}
+
+
+
+\section{Feature Importance}
+
+We analyse the XGBoost model using both gain-based feature importance and SHAP values.
+
+\begin{figure}[H]
+    \centering
+    \begin{subfigure}{0.48\linewidth}
+        \centering
+        \includegraphics[height=0.28\textheight]{images/xgb_feature_importance.png}
+        \caption{Gain-based feature importance.}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}{0.48\linewidth}
+        \centering
+        \includegraphics[height=0.28\textheight]{images/xgb_shap.png}
+        \caption{SHAP summary plot.}
+    \end{subfigure}
+    \caption{Feature importance analysis for the high-recall XGBoost model.}
+    \label{fig:xgb-importance}
+\end{figure}
+
+Both analyses indicate that the model relies primarily on short-term moisture and fuel-dryness signals: recent precipitation, days since rain, and fuel-moisture indices are consistently the strongest predictors. Fire-weather variables and spatial coordinates also contribute, reflecting clear regional and environmental patterns. SHAP values show that dry, hot, low-humidity conditions push predictions toward ignition, while wetter conditions reduce risk. Overall, the model captures physically intuitive relationships between weather, landscape, and ignition likelihood.
+
+
+\chapter{Error Analysis}
+
+We analyse errors for the high-recall XGBoost model, which reflects our priority of minimising missed fires.
+
+\section{Temporal Errors}
+
+As shown in Figure~\ref{fig:temporal-error}, the temporal error pattern closely follows the changing fire-label distribution. In 2022--2023, when fires are relatively rare, the model produces mainly false positives due to the recall-oriented threshold. From early 2024 onward, the fire rate rises sharply, reducing both false positives and overall errors: most days are true fire days, and false negatives become the dominant error type. The improved performance in 2024--2025 is therefore driven by the unusually high fire prevalence rather than better model generalisation.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\linewidth]{images/temporal_error.png}
+    \caption{Smoothed daily mistakes (7-day rolling average) for the high-recall XGBoost model.}
+    \label{fig:temporal-error}
+\end{figure}
+
+\section{Spatial Errors}
+
+Figure~\ref{fig:spatial-error} shows that false positives are widespread across the western and central U.S., where many non-fire days resemble typical ignition conditions. False negatives appear mainly in the Northeast and Midwest, indicating weaker generalisation to regions whose ignition patterns differ from the western-dominated training signal. This spatial contrast reflects strong performance in common fire environments and reduced accuracy in less typical ignition settings.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.5\linewidth]{images/spatial_error.png}
+    \caption{Spatial distribution of false positives and false negatives.}
+    \label{fig:spatial-error}
+\end{figure}
+
+\subsection{Error Regimes and Implications}
+
+Clustering the false negatives reveals two main regimes: (1) urban and peri-urban West Coast areas, where ignitions receive intermediate scores below the decision threshold, and (2) high-elevation shrub and forest regions, which show distinct humidity and precipitation patterns and produce high but sub-threshold scores. These regimes align with those targeted by the regime-specific thresholds used in Section~\ref{sec:results}, which reduce false negatives and expected cost without retraining the model.
+
+\section{Comparison to State of the Art}
+
+State-of-the-art studies such as EWXS~\cite{liu2025ewxs}, the Montesinho model~\cite{dong2022montesinho}, and North American susceptibility mapping~\cite{khan2025susceptibility} typically focus on smaller regions or coarser temporal resolutions. In contrast, our model predicts ignition nationwide using daily aggregated meteorology, terrain, and land cover. 
+
+Across the literature, tree-based ensembles consistently deliver the strongest results. EWXS reports near-perfect accuracy ($\sim$99\%, AUC 0.983), while the Montesinho model achieves moderate performance ($\sim$82\% accuracy, AUC $\sim$0.80). These findings mirror our results, where XGBoost provides the most stable and competitive performance among the tested models. Although numerical comparison is not directly meaningful, our model follows the established trend that gradient-boosted trees remain a robust and practical choice for wildfire-ignition prediction.
+
+
+\appendix
+\refstepcounter{chapter}
+\chapter*{Appendix}
+\addcontentsline{toc}{chapter}{Appendix}
+
+\section{Additional Figures}
+\begin{figure}[H]
+    \centering
+    \begin{subfigure}{0.48\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{images/xgb_roc_high_recall.png}
+        \caption{ROC curve (AUC = 0.654).}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}{0.48\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{images/xgb_pr_high_recall.png}
+        \caption{Precision--Recall curve (AP = 0.714).}
+    \end{subfigure}
+    \caption{ROC and Precision--Recall curves for the high-recall XGBoost model.}
+    \label{fig:xgb-roc-pr}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.7\linewidth]{images/xgb_cm_high_recall.png}
+    \caption{Confusion matrix for the high-recall XGBoost model on the 2022--2025 test set.}
+    \label{fig:xgb-cm}
+\end{figure}
+\bibliography{references}
+
+\backmatter
+\chapter{Ehrenwörtliche Erklärung}
+
+Ich versichere, dass ich die beiliegende Bachelor-, Master-, Seminar-, oder
+Projektarbeit ohne Hilfe Dritter und ohne Benutzung anderer als der angegebenen
+Quellen und in der untenstehenden Tabelle angegebenen Hilfsmittel angefertigt
+und die den benutzten Quellen wörtlich oder inhaltlich entnommenen Stellen als
+solche kenntlich gemacht habe. Diese Arbeit hat in gleicher oder ähnlicher Form
+noch keiner Prüfungsbehörde vorgelegen. Ich bin mir bewusst, dass eine falsche
+Erklärung rechtliche Folgen haben wird.
+
+I certify that the attached bachelor's, master's, seminar, or project thesis has been completed without the assistance of third parties and without the use of resources other than those specified, and that all passages taken either verbatim or in content from the sources used have been clearly identified as such. This work has not been submitted to an examination board in the same or similar form. I am aware that a false declaration may have legal consequences. 
+
+% Declare below which AI tools you used in the process of writing your work,
+% including text, image, code, and data generation. If you used a tool for a
+% purpose not included in the list yet, add it to the list.
+\begin{center}
+  \textbf{Declaration of Used AI Tools} \\[.3em]
+  \begin{tabularx}{\textwidth}{lXlc}
+    \toprule
+    Tool & Purpose & Where? & Useful? \\
+    \midrule
+    ChatGPT & Rephrasing & Throughout & + \\
+    ChatGPT & LaTeX Trouble Shooting & Throughout & + \\
+    ResearchGPT & Summarization of related work & State of the Art Studies & + \\
+    ChatGPT & Pipeline Building and Understanding & Models & ++ \\
+    ChatGPT & Visuals Creation & Figure \ref{fig:spatial-error}, \ref{fig:temporal-error} & + \\
+    ChatGPT & references.bib code generation & Bibliography & ++ \\
+    \bottomrule
+  \end{tabularx}
+\end{center}
+
+\vspace{0.5cm}
+\noindent Unterschrift\\
+\noindent Mannheim, den 30.11.2025 \hfill
+
+\end{document}
